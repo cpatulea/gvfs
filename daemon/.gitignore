@@ -14,6 +14,7 @@ gvfsd-network
 gvfsd-obexftp
 gvfsd-sftp
 gvfsd-smb
+gvfsd-smb4
 gvfsd-smb-browse
 gvfsd-test
 gvfsd-trash

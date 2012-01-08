@@ -6,6 +6,7 @@ mountdir = $(datadir)/gvfs/mounts
 
 INCLUDES =					\
 	$(SAMBA_CFLAGS)                         \
+	$(SAMBA4_CFLAGS)                        \
 	-I$(top_srcdir)				\
 	-I$(top_srcdir)/common			\
 	-I$(top_builddir)			\
@@ -51,10 +52,15 @@ endif
 libexec_PROGRAMS += gvfsd-http gvfsd-dav
 endif
 
-mount_in_files += smb.mount.in smb-browse.mount.in
+mount_in_files += smb.mount.in smb4.mount.in smb-browse.mount.in
 if HAVE_SAMBA
 mount_DATA += smb.mount smb-browse.mount
 libexec_PROGRAMS += gvfsd-smb-browse gvfsd-smb
+endif
+
+if HAVE_SAMBA4
+mount_DATA += smb4.mount
+libexec_PROGRAMS += gvfsd-smb4
 endif
 
 mount_in_files += cdda.mount.in
@@ -207,6 +213,20 @@ gvfsd_smb_CPPFLAGS = \
 	-DBACKEND_TYPES='"smb-share", G_VFS_TYPE_BACKEND_SMB,'
 
 gvfsd_smb_LDADD = $(SAMBA_LIBS) $(GCONF_LIBS) $(libraries)
+
+gvfsd_smb4_SOURCES = \
+	gvfsbackendsmb4.c gvfsbackendsmb4.h \
+	daemon-main.c daemon-main.h \
+	daemon-main-generic.c
+
+gvfsd_smb4_CPPFLAGS = \
+	-DBACKEND_HEADER=gvfsbackendsmb4.h \
+	-DDEFAULT_BACKEND_TYPE=smb4-share \
+	-DMAX_JOB_THREADS=1 \
+	$(GCONF_CFLAGS) \
+	-DBACKEND_TYPES='"smb4-share", G_VFS_TYPE_BACKEND_SMB4,'
+
+gvfsd_smb4_LDADD = $(SAMBA4_LIBS) $(GCONF_LIBS) $(libraries)
 
 gvfsd_smb_browse_SOURCES = \
 	gvfsbackendsmbbrowse.c gvfsbackendsmbbrowse.h \

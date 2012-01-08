@@ -1,0 +1,5 @@
+[Mount]
+Type=smb4-share
+Exec=@libexecdir@/gvfsd-smb4
+AutoMount=false
+Scheme=smb4

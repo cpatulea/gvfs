@@ -496,6 +496,64 @@ AC_SUBST(SAMBA_LIBS)
 
 dnl ==========================================================================
 
+dnl ==========================================================================
+dnl Samba 4
+
+AC_ARG_ENABLE(samba4, AS_HELP_STRING([--disable-samba4],[build without samba4 support]))
+msg_samba4="no"
+if test "x$enable_samba4" != "xno"; then
+  AC_ARG_WITH(samba4-includes, AS_HELP_STRING([--with-samba4-includes=PREFIX],[Location of samba4 includes.]),
+        with_samba4_includes="$withval", with_samba4_includes="/usr/include")
+  have_samba4_includes="no"
+  if test "x${with_samba4_includes}" != "xno"; then
+  CPPFLAGS_save="$CPPFLAGS"
+
+  CPPFLAGS="$CPPFLAGS -I$with_samba4_includes"
+  AC_CHECK_HEADER(samba_util.h, [ samba4_includes="yes" ],, [#include <stdbool.h>
+#include <stdint.h>])
+  CPPFLAGS="$CPPFLAGS_save"
+
+  if test "x{samba4_includes}" != "xno" -a "x${samba4_includes}" != "x"; then
+    have_samba4_includes="yes"
+    if test "${with_samba4_includes}" != "/usr/include" ; then
+      SAMBA4_CFLAGS="-I$with_samba4_includes"
+    else
+      SAMBA4_CFLAGS=""
+    fi
+  else
+    SAMBA4_CFLAGS=""
+  fi
+  fi
+  AC_ARG_WITH(samba4-libs, AS_HELP_STRING([--with-samba4-libs=PREFIX],[Location of Samba4 libs.]),
+        with_samba4_libs="$withval", with_samba4_libs="/usr/lib")
+  if test "x${with_samba4_libs}" != "xno" -a "x${have_samba4_includes}" != "xno"; then
+  LDFLAGS_save="$LDFLAGS"
+
+  LDFLAGS="$LDFLAGS -L$with_samba4_libs"
+  AC_CHECK_LIB(smbclient-raw, smbcli_tree_init,samba4_libs="yes", samba4_libs="no")
+  LDFLAGS="$LDFLAGS_save"
+  if test "x${samba4_libs}" != "xno"; then
+    AC_DEFINE(HAVE_SAMBA4,, [Define to 1 if you have the samba 4 libraries])
+    msg_samba4="yes"
+                if test x$with_samba4_libs != x/usr/lib; then
+                        SAMBA4_LIBS="-L$with_samba4_libs -lsmbclient-raw"
+                else
+                  SAMBA4_LIBS="-lsmbclient-raw"
+                fi
+  else
+    SAMBA4_CFLAGS=""
+    SAMBA4_LIBS=""
+  fi
+  fi
+  AC_MSG_CHECKING(for Samba 4 libraries)
+  AC_MSG_RESULT($msg_samba4)
+fi
+AM_CONDITIONAL(HAVE_SAMBA4, test "$msg_samba4" = "yes")
+AC_SUBST(SAMBA4_CFLAGS)
+AC_SUBST(SAMBA4_LIBS)
+
+dnl ==========================================================================
+
 dnl ****************************
 dnl *** Check for libarchive ***
 dnl ****************************
@@ -718,7 +776,8 @@ echo "
 
         FTP/HTTP/WebDAV support       $msg_http
         ObexFTP support               $msg_obexftp
-	Samba support:	              $msg_samba
+	Samba 3 support:              $msg_samba
+	Samba 4 support:              $msg_samba4
 	FUSE support:                 $msg_fuse
         CDDA support:                 $msg_cdda
         Gphoto2 support:              $msg_gphoto2

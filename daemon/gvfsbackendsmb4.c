@@ -63,6 +63,24 @@
 #include "libsmb-compat.h"
 #endif
 
+#include <talloc.h>
+#include <tevent.h>
+
+void
+g_vfs_smb4_daemon_init (void)
+{
+  g_set_application_name (_("Windows Shares Filesystem Service (Samba 4)"));
+
+  /* talloc_abort_fn is abort() by default */
+  talloc_set_log_stderr();
+  /* XXX: for development
+   * NOTE: atexit seems to run in gvfsd asynchronously from backend_finalize,
+   *       so it always looks like we leaked the event_context..
+   */
+  talloc_enable_leak_report();
+  tevent_set_default_backend("glib");
+}
+
 struct _GVfsBackendSmb4
 {
   GVfsBackend parent_instance;
@@ -71,7 +89,9 @@ struct _GVfsBackendSmb4
   char *share;
   char *user;
   char *domain;
-  
+
+  TALLOC_CTX *mem_ctx;
+  struct tevent_context *ev;
 #if 0
   SMBCCTX *smb_context;
 
@@ -102,6 +122,52 @@ static char *default_workgroup = NULL;
 
 G_DEFINE_TYPE (GVfsBackendSmb4, g_vfs_backend_smb4, G_VFS_TYPE_BACKEND);
 
+static gboolean
+try_mount (GVfsBackend *backend,
+	   GVfsJobMount *job,
+	   GMountSpec *mount_spec,
+	   GMountSource *mount_source,
+	   gboolean is_automount);
+static void
+g_vfs_backend_smb4_finalize (GObject *object);
+
+static void
+g_vfs_backend_smb4_class_init (GVfsBackendSmb4Class *klass)
+{
+  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+  GVfsBackendClass *backend_class = G_VFS_BACKEND_CLASS (klass);
+
+  gobject_class->finalize = g_vfs_backend_smb4_finalize;
+
+#if 0
+  backend_class->mount = do_mount;
+#endif
+  backend_class->try_mount = try_mount;
+#if 0
+  backend_class->open_for_read = do_open_for_read;
+  backend_class->read = do_read;
+  backend_class->seek_on_read = do_seek_on_read;
+  backend_class->query_info_on_read = do_query_info_on_read;
+  backend_class->close_read = do_close_read;
+  backend_class->create = do_create;
+  backend_class->append_to = do_append_to;
+  backend_class->replace = do_replace;
+  backend_class->write = do_write;
+  backend_class->seek_on_write = do_seek_on_write;
+  backend_class->query_info_on_write = do_query_info_on_write;
+  backend_class->close_write = do_close_write;
+  backend_class->query_info = do_query_info;
+  backend_class->query_fs_info = do_query_fs_info;
+  backend_class->enumerate = do_enumerate;
+  backend_class->set_display_name = do_set_display_name;
+  backend_class->delete = do_delete;
+  backend_class->make_directory = do_make_directory;
+  backend_class->move = do_move;
+  backend_class->try_query_settable_attributes = try_query_settable_attributes;
+  backend_class->set_attribute = do_set_attribute;
+#endif
+}
+
 #if 0
 static void set_info_from_stat (GVfsBackendSmb *backend,
 				GFileInfo *info,
@@ -109,22 +175,6 @@ static void set_info_from_stat (GVfsBackendSmb *backend,
 				const char *basename,
 				GFileAttributeMatcher *matcher);
 #endif
-
-static void
-g_vfs_backend_smb4_finalize (GObject *object)
-{
-  GVfsBackendSmb4 *backend;
-
-  backend = G_VFS_BACKEND_SMB4 (object);
-
-  g_free (backend->share);
-  g_free (backend->server);
-  g_free (backend->user);
-  g_free (backend->domain);
-  
-  if (G_OBJECT_CLASS (g_vfs_backend_smb4_parent_class)->finalize)
-    (*G_OBJECT_CLASS (g_vfs_backend_smb4_parent_class)->finalize) (object);
-}
 
 static void
 g_vfs_backend_smb4_init (GVfsBackendSmb4 *backend)
@@ -150,7 +200,16 @@ g_vfs_backend_smb4_init (GVfsBackendSmb4 *backend)
       g_object_unref (gclient);
     }
 #endif
+
+  backend->mem_ctx = talloc_named(NULL, 0, "Context for GVfsBackendSmb4 at %p",
+					   backend);
+  g_assert(backend->mem_ctx != NULL);
+
+  backend->ev = tevent_context_init(backend->mem_ctx);
+  g_assert(backend->ev != NULL);
 }
+
+
 
 #if 0
 /**
@@ -2137,45 +2196,22 @@ do_move (GVfsBackend *backend,
 }
 #endif
 
+
 static void
-g_vfs_backend_smb4_class_init (GVfsBackendSmb4Class *klass)
+g_vfs_backend_smb4_finalize (GObject *object)
 {
-  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
-  GVfsBackendClass *backend_class = G_VFS_BACKEND_CLASS (klass);
-  
-  gobject_class->finalize = g_vfs_backend_smb4_finalize;
+  GVfsBackendSmb4 *backend;
 
-#if 0
-  backend_class->mount = do_mount;
-#endif
-  backend_class->try_mount = try_mount;
-#if 0
-  backend_class->open_for_read = do_open_for_read;
-  backend_class->read = do_read;
-  backend_class->seek_on_read = do_seek_on_read;
-  backend_class->query_info_on_read = do_query_info_on_read;
-  backend_class->close_read = do_close_read;
-  backend_class->create = do_create;
-  backend_class->append_to = do_append_to;
-  backend_class->replace = do_replace;
-  backend_class->write = do_write;
-  backend_class->seek_on_write = do_seek_on_write;
-  backend_class->query_info_on_write = do_query_info_on_write;
-  backend_class->close_write = do_close_write;
-  backend_class->query_info = do_query_info;
-  backend_class->query_fs_info = do_query_fs_info;
-  backend_class->enumerate = do_enumerate;
-  backend_class->set_display_name = do_set_display_name;
-  backend_class->delete = do_delete;
-  backend_class->make_directory = do_make_directory;
-  backend_class->move = do_move;
-  backend_class->try_query_settable_attributes = try_query_settable_attributes;
-  backend_class->set_attribute = do_set_attribute;
-#endif
-}
+  backend = G_VFS_BACKEND_SMB4 (object);
 
-void
-g_vfs_smb4_daemon_init (void)
-{
-  g_set_application_name (_("Windows Shares Filesystem Service (Samba 4)"));
+  TALLOC_FREE(backend->ev);
+  TALLOC_FREE(backend->mem_ctx);
+
+  g_free (backend->share);
+  g_free (backend->server);
+  g_free (backend->user);
+  g_free (backend->domain);
+
+  if (G_OBJECT_CLASS (g_vfs_backend_smb4_parent_class)->finalize)
+    (*G_OBJECT_CLASS (g_vfs_backend_smb4_parent_class)->finalize) (object);
 }

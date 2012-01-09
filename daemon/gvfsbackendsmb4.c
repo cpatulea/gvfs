@@ -65,6 +65,9 @@
 
 #include <talloc.h>
 #include <tevent.h>
+#include <credentials.h>
+#include <util/time.h>
+#include <smb_cliraw.h>
 
 void
 g_vfs_smb4_daemon_init (void)
@@ -92,6 +95,7 @@ struct _GVfsBackendSmb4
 
   TALLOC_CTX *mem_ctx;
   struct tevent_context *ev;
+  struct smbcli_state *cli;
 #if 0
   SMBCCTX *smb_context;
 
@@ -116,9 +120,7 @@ struct _GVfsBackendSmb4
 #endif
 };
 
-#if 0
 static char *default_workgroup = NULL;
-#endif
 
 G_DEFINE_TYPE (GVfsBackendSmb4, g_vfs_backend_smb4, G_VFS_TYPE_BACKEND);
 
@@ -128,6 +130,14 @@ try_mount (GVfsBackend *backend,
 	   GMountSpec *mount_spec,
 	   GMountSource *mount_source,
 	   gboolean is_automount);
+static void
+do_mount (GVfsBackend *backend,
+          GVfsJobMount *job,
+          GMountSpec *mount_spec,
+          GMountSource *mount_source,
+          gboolean is_automount);
+static const char *
+password_callback(struct cli_credentials *cred);
 static void
 g_vfs_backend_smb4_finalize (GObject *object);
 
@@ -139,10 +149,8 @@ g_vfs_backend_smb4_class_init (GVfsBackendSmb4Class *klass)
 
   gobject_class->finalize = g_vfs_backend_smb4_finalize;
 
-#if 0
-  backend_class->mount = do_mount;
-#endif
   backend_class->try_mount = try_mount;
+  backend_class->mount = do_mount;
 #if 0
   backend_class->open_for_read = do_open_for_read;
   backend_class->read = do_read;
@@ -201,15 +209,277 @@ g_vfs_backend_smb4_init (GVfsBackendSmb4 *backend)
     }
 #endif
 
-  backend->mem_ctx = talloc_named(NULL, 0, "Context for GVfsBackendSmb4 at %p",
-					   backend);
+  backend->mem_ctx = talloc_init("Context for GVfsBackendSmb4 at %p", backend);
   g_assert(backend->mem_ctx != NULL);
 
   backend->ev = tevent_context_init(backend->mem_ctx);
   g_assert(backend->ev != NULL);
 }
 
+static gboolean
+try_mount (GVfsBackend *backend,
+           GVfsJobMount *job,
+           GMountSpec *mount_spec,
+           GMountSource *mount_source,
+           gboolean is_automount)
+{
+  GVfsBackendSmb4 *op_backend = G_VFS_BACKEND_SMB4 (backend);
+  const char *server, *share, *user, *domain;
 
+  server = g_mount_spec_get (mount_spec, "server");
+  share = g_mount_spec_get (mount_spec, "share");
+
+  if (server == NULL || share == NULL)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                        _("Invalid mount spec"));
+      return TRUE;
+    }
+
+  user = g_mount_spec_get (mount_spec, "user");
+  domain = g_mount_spec_get (mount_spec, "domain");
+
+  op_backend->server = g_strdup (server);
+  op_backend->share = g_strdup (share);
+  op_backend->user = g_strdup (user);
+  op_backend->domain = g_strdup (domain);
+
+  return FALSE;
+}
+
+static void
+do_mount (GVfsBackend *backend,
+          GVfsJobMount *job,
+          GMountSpec *mount_spec,
+          GMountSource *mount_source,
+          gboolean is_automount)
+{
+  GVfsBackendSmb4 * const op_backend = G_VFS_BACKEND_SMB4 (backend);
+  TALLOC_CTX * const mem_ctx = op_backend->mem_ctx;
+
+  /* XXX: get this from lpcfg_smb_ports? */
+  const char **ports = NULL;
+
+  const char *socket_options = NULL;
+  struct cli_credentials *cred;
+
+  /* XXX: get this from lpcfg_resolve_context? */
+  struct resolve_context *resolve_ctx = NULL;
+
+  /* XXX: get this from lpcfg_smbcli_options? */
+  struct smbcli_options *options = NULL;
+
+  /* XXX: get this from lpcfg_smbcli_session_options? */
+  struct smbcli_session_options *session_options = NULL;
+
+  /* XXX: get this from lpcfg_gensec_settings? */
+  struct gensec_settings *gensec_settings = NULL;
+  NTSTATUS status;
+
+#if 0
+  SMBCCTX *smb_context;
+  struct stat st;
+  char *uri;
+  int res;
+  char *display_name;
+  const char *debug;
+  int debug_val;
+  GMountSpec *smb_mount_spec;
+  smbc_stat_fn smbc_stat;
+#endif
+
+  cred = cli_credentials_init(mem_ctx);
+  g_assert(cred != NULL);
+
+  if (default_workgroup != NULL) {
+    cli_credentials_set_domain(cred, default_workgroup, CRED_SPECIFIED);
+  }
+
+  if (op_backend->domain != NULL) {
+    cli_credentials_set_domain(cred, op_backend->domain, CRED_SPECIFIED);
+  }
+
+  if (op_backend->user == NULL) {
+    /* anonymous */
+    cli_credentials_set_username(cred, "", CRED_SPECIFIED);
+  } else {
+    cli_credentials_set_username(cred, op_backend->user, CRED_SPECIFIED);
+  }
+
+  cli_credentials_set_password_callback(cred, password_callback);
+
+  status = smbcli_tree_full_connection(mem_ctx, &op_backend->cli,
+                                       op_backend->server, ports,
+                                       op_backend->share, NULL,
+                                       socket_options,
+                                       cred, resolve_ctx,
+                                       op_backend->ev, options, session_options,
+                                       gensec_settings);
+
+#if 0
+  smb_context = smbc_new_context ();
+  if (smb_context == NULL)
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR, G_IO_ERROR_FAILED,
+                        _("Internal Error (%s)"), "Failed to allocate smb context");
+      return;
+    }
+  smbc_setOptionUserData (smb_context, backend);
+
+  debug = g_getenv ("GVFS_SMB_DEBUG");
+  if (debug)
+    debug_val = atoi (debug);
+  else
+    debug_val = 0;
+
+  smbc_setDebug (smb_context, debug_val);
+  smbc_setFunctionAuthDataWithContext (smb_context, auth_callback);
+
+  smbc_setFunctionAddCachedServer (smb_context, add_cached_server);
+  smbc_setFunctionGetCachedServer (smb_context, get_cached_server);
+  smbc_setFunctionRemoveCachedServer (smb_context, remove_cached_server);
+  smbc_setFunctionPurgeCachedServers (smb_context, purge_cached);
+
+  /* FIXME: is strdup() still needed here? -- removed */
+  if (default_workgroup != NULL)
+    smbc_setWorkgroup (smb_context, default_workgroup);
+
+#ifndef DEPRECATED_SMBC_INTERFACE
+  smb_context->flags = 0;
+#endif
+  
+  /* Initial settings:
+   *   - use Kerberos (always)
+   *   - in case of no username specified, try anonymous login
+   */
+  smbc_setOptionUseKerberos (smb_context, 1);
+  smbc_setOptionFallbackAfterKerberos (smb_context,
+                                       op_backend->user != NULL);
+  smbc_setOptionNoAutoAnonymousLogin (smb_context,
+                                      op_backend->user != NULL);
+
+  
+#if 0
+  smbc_setOptionDebugToStderr (smb_context, 1);
+#endif
+  
+  if (!smbc_init_context (smb_context))
+    {
+      g_vfs_job_failed (G_VFS_JOB (job),
+                        G_IO_ERROR, G_IO_ERROR_FAILED,
+                        _("Internal Error (%s)"), "Failed to initialize smb context");
+      smbc_free_context (smb_context, FALSE);
+      return;
+    }
+
+  op_backend->smb_context = smb_context;
+
+  /* Set the mountspec according to original uri, no matter whether user changes
+     credentials during mount loop. Nautilus and other gio clients depend
+     on correct mountspec, setting it to real (different) credentials would 
+     lead to G_IO_ERROR_NOT_MOUNTED errors
+   */
+
+  /* Translators: This is "<sharename> on <servername>" and is used as name for an SMB share */
+  display_name = g_strdup_printf (_("%s on %s"), op_backend->share, op_backend->server);
+  g_vfs_backend_set_display_name (backend, display_name);
+  g_free (display_name);
+  g_vfs_backend_set_icon_name (backend, "folder-remote");
+
+  smb_mount_spec = g_mount_spec_new ("smb-share");
+  g_mount_spec_set (smb_mount_spec, "share", op_backend->share);
+  g_mount_spec_set (smb_mount_spec, "server", op_backend->server);
+  if (op_backend->user)
+    g_mount_spec_set (smb_mount_spec, "user", op_backend->user);
+  if (op_backend->domain)
+    g_mount_spec_set (smb_mount_spec, "domain", op_backend->domain);
+
+  g_vfs_backend_set_mount_spec (backend, smb_mount_spec);
+  g_mount_spec_unref (smb_mount_spec);
+
+  uri = create_smb_uri (op_backend->server, op_backend->share, NULL);
+
+
+  /*  Samba mount loop  */
+  op_backend->mount_source = mount_source;
+  op_backend->mount_try = 0;
+  op_backend->password_save = G_PASSWORD_SAVE_NEVER;
+
+  do
+    {
+      op_backend->mount_try_again = FALSE;
+      op_backend->mount_cancelled = FALSE;
+
+      smbc_stat = smbc_getFunctionStat (smb_context);
+      res = smbc_stat (smb_context, uri, &st);
+      
+      if (res == 0 || op_backend->mount_cancelled ||
+          (errno != EACCES && errno != EPERM))
+        break;
+
+      /* The first round is Kerberos-only.  Only if this fails do we enable
+       * NTLMSSP fallback (turning off anonymous fallback, which we've
+       * already tried and failed with).
+       */
+      if (op_backend->mount_try == 0)
+        {
+          smbc_setOptionFallbackAfterKerberos (op_backend->smb_context, 1);
+          smbc_setOptionNoAutoAnonymousLogin (op_backend->smb_context, 1);
+        }
+      op_backend->mount_try ++;
+    }
+  while (op_backend->mount_try_again);
+  
+  g_free (uri);
+  
+  op_backend->mount_source = NULL;
+
+  if (res != 0)
+    {
+      /* TODO: Error from errno? */
+      op_backend->mount_source = NULL;
+      
+      if (op_backend->mount_cancelled) 
+        g_vfs_job_failed (G_VFS_JOB (job),
+                          G_IO_ERROR, G_IO_ERROR_FAILED_HANDLED,
+                          _("Password dialog cancelled"));
+      else
+        g_vfs_job_failed (G_VFS_JOB (job),
+                          G_IO_ERROR, G_IO_ERROR_FAILED,
+                          /* translators: We tried to mount a windows (samba) share, but failed */
+                          _("Failed to mount Windows share"));
+
+      return;
+    }
+
+  /* Mount was successful */
+
+  g_vfs_keyring_save_password (op_backend->last_user,
+                               op_backend->server,
+                               op_backend->last_domain,
+                               "smb",
+                               NULL,
+                               NULL,
+                               0,
+                               op_backend->last_password,
+                               op_backend->password_save);
+  
+  g_vfs_job_succeeded (G_VFS_JOB (job));
+#endif
+  g_vfs_job_failed (G_VFS_JOB(job),
+                    G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                    _("Not implemented yet ;)"));
+}
+
+
+static const char *
+password_callback(struct cli_credentials *cred)
+{
+  g_debug("password_callback\n");
+  return "";
+}
 
 #if 0
 /**
@@ -548,207 +818,7 @@ create_smb_uri (const char *server,
   return g_string_free (uri, FALSE);
 }
 
-static void
-do_mount (GVfsBackend *backend,
-	  GVfsJobMount *job,
-	  GMountSpec *mount_spec,
-	  GMountSource *mount_source,
-	  gboolean is_automount)
-{
-  GVfsBackendSmb *op_backend = G_VFS_BACKEND_SMB (backend);
-  SMBCCTX *smb_context;
-  struct stat st;
-  char *uri;
-  int res;
-  char *display_name;
-  const char *debug;
-  int debug_val;
-  GMountSpec *smb_mount_spec;
-  smbc_stat_fn smbc_stat;
-
-  smb_context = smbc_new_context ();
-  if (smb_context == NULL)
-    {
-      g_vfs_job_failed (G_VFS_JOB (job),
-			G_IO_ERROR, G_IO_ERROR_FAILED,
-			_("Internal Error (%s)"), "Failed to allocate smb context");
-      return;
-    }
-  smbc_setOptionUserData (smb_context, backend);
-
-  debug = g_getenv ("GVFS_SMB_DEBUG");
-  if (debug)
-    debug_val = atoi (debug);
-  else
-    debug_val = 0;
-
-  smbc_setDebug (smb_context, debug_val);
-  smbc_setFunctionAuthDataWithContext (smb_context, auth_callback);
-  
-  smbc_setFunctionAddCachedServer (smb_context, add_cached_server);
-  smbc_setFunctionGetCachedServer (smb_context, get_cached_server);
-  smbc_setFunctionRemoveCachedServer (smb_context, remove_cached_server);
-  smbc_setFunctionPurgeCachedServers (smb_context, purge_cached);
-
-  /* FIXME: is strdup() still needed here? -- removed */
-  if (default_workgroup != NULL)
-    smbc_setWorkgroup (smb_context, default_workgroup);
-
-#ifndef DEPRECATED_SMBC_INTERFACE
-  smb_context->flags = 0;
 #endif
-  
-  /* Initial settings:
-   *   - use Kerberos (always)
-   *   - in case of no username specified, try anonymous login
-   */
-  smbc_setOptionUseKerberos (smb_context, 1);
-  smbc_setOptionFallbackAfterKerberos (smb_context,
-                                       op_backend->user != NULL);
-  smbc_setOptionNoAutoAnonymousLogin (smb_context,
-                                      op_backend->user != NULL);
-
-  
-#if 0
-  smbc_setOptionDebugToStderr (smb_context, 1);
-#endif
-  
-  if (!smbc_init_context (smb_context))
-    {
-      g_vfs_job_failed (G_VFS_JOB (job),
-			G_IO_ERROR, G_IO_ERROR_FAILED,
-			_("Internal Error (%s)"), "Failed to initialize smb context");
-      smbc_free_context (smb_context, FALSE);
-      return;
-    }
-
-  op_backend->smb_context = smb_context;
-
-  /* Set the mountspec according to original uri, no matter whether user changes
-     credentials during mount loop. Nautilus and other gio clients depend
-     on correct mountspec, setting it to real (different) credentials would 
-     lead to G_IO_ERROR_NOT_MOUNTED errors
-   */
-
-  /* Translators: This is "<sharename> on <servername>" and is used as name for an SMB share */
-  display_name = g_strdup_printf (_("%s on %s"), op_backend->share, op_backend->server);
-  g_vfs_backend_set_display_name (backend, display_name);
-  g_free (display_name);
-  g_vfs_backend_set_icon_name (backend, "folder-remote");
-
-  smb_mount_spec = g_mount_spec_new ("smb-share");
-  g_mount_spec_set (smb_mount_spec, "share", op_backend->share);
-  g_mount_spec_set (smb_mount_spec, "server", op_backend->server);
-  if (op_backend->user)
-    g_mount_spec_set (smb_mount_spec, "user", op_backend->user);
-  if (op_backend->domain)
-    g_mount_spec_set (smb_mount_spec, "domain", op_backend->domain);
-
-  g_vfs_backend_set_mount_spec (backend, smb_mount_spec);
-  g_mount_spec_unref (smb_mount_spec);
-
-  uri = create_smb_uri (op_backend->server, op_backend->share, NULL);
-
-
-  /*  Samba mount loop  */
-  op_backend->mount_source = mount_source;
-  op_backend->mount_try = 0;
-  op_backend->password_save = G_PASSWORD_SAVE_NEVER;
-
-  do
-    {
-      op_backend->mount_try_again = FALSE;
-      op_backend->mount_cancelled = FALSE;
-
-      smbc_stat = smbc_getFunctionStat (smb_context);
-      res = smbc_stat (smb_context, uri, &st);
-      
-      if (res == 0 || op_backend->mount_cancelled ||
-	  (errno != EACCES && errno != EPERM))
-	break;
-
-      /* The first round is Kerberos-only.  Only if this fails do we enable
-       * NTLMSSP fallback (turning off anonymous fallback, which we've
-       * already tried and failed with).
-       */
-      if (op_backend->mount_try == 0)
-        {
-          smbc_setOptionFallbackAfterKerberos (op_backend->smb_context, 1);
-          smbc_setOptionNoAutoAnonymousLogin (op_backend->smb_context, 1);
-        }
-      op_backend->mount_try ++;
-    }
-  while (op_backend->mount_try_again);
-  
-  g_free (uri);
-  
-  op_backend->mount_source = NULL;
-
-  if (res != 0)
-    {
-      /* TODO: Error from errno? */
-      op_backend->mount_source = NULL;
-      
-      if (op_backend->mount_cancelled) 
-        g_vfs_job_failed (G_VFS_JOB (job),
-			  G_IO_ERROR, G_IO_ERROR_FAILED_HANDLED,
-			  _("Password dialog cancelled"));
-      else
-        g_vfs_job_failed (G_VFS_JOB (job),
-			  G_IO_ERROR, G_IO_ERROR_FAILED,
-			  /* translators: We tried to mount a windows (samba) share, but failed */
-			  _("Failed to mount Windows share"));
-
-      return;
-    }
-
-  /* Mount was successful */
-
-  g_vfs_keyring_save_password (op_backend->last_user,
-			       op_backend->server,
-			       op_backend->last_domain,
-			       "smb",
-			       NULL,
-			       NULL,
-			       0,
-			       op_backend->last_password,
-			       op_backend->password_save);
-  
-  g_vfs_job_succeeded (G_VFS_JOB (job));
-}
-#endif
-
-static gboolean
-try_mount (GVfsBackend *backend,
-	   GVfsJobMount *job,
-	   GMountSpec *mount_spec,
-	   GMountSource *mount_source,
-	   gboolean is_automount)
-{
-  GVfsBackendSmb4 *op_backend = G_VFS_BACKEND_SMB4 (backend);
-  const char *server, *share, *user, *domain;
-
-  server = g_mount_spec_get (mount_spec, "server");
-  share = g_mount_spec_get (mount_spec, "share");
-
-  if (server == NULL || share == NULL)
-    {
-      g_vfs_job_failed (G_VFS_JOB (job),
-			G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-			_("Invalid mount spec"));
-      return TRUE;
-    }
-
-  user = g_mount_spec_get (mount_spec, "user");
-  domain = g_mount_spec_get (mount_spec, "domain");
-  
-  op_backend->server = g_strdup (server);
-  op_backend->share = g_strdup (share);
-  op_backend->user = g_strdup (user);
-  op_backend->domain = g_strdup (domain);
-  
-  return FALSE;
-}
 
 #if 0
 static int

@@ -69,6 +69,19 @@
 #include <util/time.h>
 #include <smb_cliraw.h>
 
+/* from samba/source4/libcli/raw/clitree.c */
+NTSTATUS smbcli_tree_full_connection(TALLOC_CTX *parent_ctx,
+                                     struct smbcli_tree **ret_tree,
+                                     const char *dest_host, const char **dest_ports,
+                                     const char *service, const char *service_type,
+                                         const char *socket_options,
+                                     struct cli_credentials *credentials,
+                                     struct resolve_context *resolve_ctx,
+                                     struct tevent_context *ev,
+                                     struct smbcli_options *options,
+                                     struct smbcli_session_options *session_options,
+                                         struct gensec_settings *gensec_settings);
+
 void
 g_vfs_smb4_daemon_init (void)
 {
@@ -95,7 +108,7 @@ struct _GVfsBackendSmb4
 
   TALLOC_CTX *mem_ctx;
   struct tevent_context *ev;
-  struct smbcli_state *cli;
+  struct smbcli_tree *tree;
 #if 0
   SMBCCTX *smb_context;
 
@@ -309,7 +322,7 @@ do_mount (GVfsBackend *backend,
 
   cli_credentials_set_password_callback(cred, password_callback);
 
-  status = smbcli_tree_full_connection(mem_ctx, &op_backend->cli,
+  status = smbcli_tree_full_connection(mem_ctx, &op_backend->tree,
                                        op_backend->server, ports,
                                        op_backend->share, NULL,
                                        socket_options,
